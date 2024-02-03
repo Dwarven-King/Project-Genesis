@@ -11,15 +11,32 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import os
+import argparse
+import numpy
+
+# anzahl iterationen
+parser = argparse.ArgumentParser()
+parser.add_argument("--iterations", default = 100, type = int, help="default 100, integer for number of iterations")
+# rendern lassen?
+parser.add_argument("--render", default = False , action="store_true", help="use to enable rendering for watching")
+parser.add_argument("--clear", default = False , action="store_true", help="clear history and plots")
+parser.add_argument("--average", default = 20, type = int, help="default 20, number of values average is made of")
+args = parser.parse_args()
 
 checkpoint_filename = "Genesis Thought.pth"
 
-# rendern lassen?
-gucken = False
-if input("Rendern? Ja (j) oder nein (n): ") == "j":
-    gucken = True
+if args.clear and os.path.exists(checkpoint_filename):
+    for file in os.listdir("plots"):
+        if file.endswith(".png"):
+            os.remove("plots/" + file)
+    os.remove(checkpoint_filename)
+    os.remove(checkpoint_filename + ".history")
+    os.remove(checkpoint_filename + ".memory")
+    os.remove(checkpoint_filename + ".episode_durations")
+    os.remove(checkpoint_filename + ".epsilons")
 
-env = gym.make("CartPole-v1", render_mode = "human" if gucken else None)
+
+env = gym.make("CartPole-v1", render_mode = "human" if args.render else None)
 
 # set up matplotlib
 is_ipython = 'inline' in matplotlib.get_backend()
@@ -98,15 +115,22 @@ memory = ReplayMemory(10000)
 if os.path.exists(checkpoint_filename):    
     memory.memory = torch.load(checkpoint_filename + ".memory")
 
-steps_done = 0
+history = dict(steps_done=0, n=0)
+if os.path.exists(checkpoint_filename):
+    history = torch.load(checkpoint_filename + ".history")
 
+episode_durations = []
+if os.path.exists(checkpoint_filename):
+    episode_durations = torch.load(checkpoint_filename + ".episode_durations")
+epsilons = []
+if os.path.exists(checkpoint_filename):
+    epsilons = torch.load(checkpoint_filename + ".epsilons")
 
 def select_action(state):
-    global steps_done
     sample = random.random()
     eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-        math.exp(-1. * steps_done / EPS_DECAY)
-    steps_done += 1
+        math.exp(-1. * history["steps_done"] / EPS_DECAY)
+    history["steps_done"] += 1
     if sample > eps_threshold:
         with torch.no_grad():
             # t.max(1) will return the largest column value of each row.
@@ -117,7 +141,6 @@ def select_action(state):
         return torch.tensor([[env.action_space.sample()]], device=device, dtype=torch.long)
 
 
-episode_durations = []
 
 
 def plot_durations(show_result=False):
@@ -129,13 +152,18 @@ def plot_durations(show_result=False):
         plt.clf()
         plt.title('Training...')
     plt.xlabel('Episode')
-    plt.ylabel('Duration')
+    plt.ylabel('Duration + Eps % 0 to 500')
     plt.plot(durations_t.numpy())
-    # Take 100 episode averages and plot them too
-    if len(durations_t) >= 100:
-        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
-        means = torch.cat((torch.zeros(99), means))
+    # Take episode averages and plot them too
+    average_over = args.average
+    if len(durations_t) >= average_over:
+        means = durations_t.unfold(0, average_over, 1).mean(1).view(-1)
+        means_till_avg = []
+        for i in range(average_over - 1):
+            means_till_avg += [numpy.average(episode_durations[:i])]
+        means = torch.cat((torch.tensor(means_till_avg, dtype=torch.float), means))
         plt.plot(means.numpy())
+    plt.plot(epsilons)
 
     plt.pause(0.001)  # pause a bit so that plots are updated
     if is_ipython:
@@ -191,11 +219,7 @@ def optimize_model():
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
 
-if torch.cuda.is_available():
-    num_episodes = 50
-else:
-    num_episodes = 50
-
+num_episodes = args.iterations
 for i_episode in range(num_episodes):
     # Initialize the environment and get its state
     state, info = env.reset()
@@ -230,13 +254,26 @@ for i_episode in range(num_episodes):
 
         if done:
             episode_durations.append(t + 1)
+            eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+            math.exp(-1. * history["steps_done"] / EPS_DECAY)
+            epsilons.append(eps_threshold*500)
             plot_durations()
             break
 
 torch.save(policy_net.state_dict(), checkpoint_filename)
 torch.save(memory.memory, checkpoint_filename + ".memory")
+torch.save(episode_durations, checkpoint_filename + ".episode_durations")
+torch.save(epsilons, checkpoint_filename + ".epsilons")
 
 print('Complete')
+# calculate plot
 plot_durations(show_result=True)
+
+# number of episodes in history +1 and save
+history["n"] += 1
+torch.save(history, checkpoint_filename + ".history")
+
 plt.ioff()
 plt.show()
+# save plot
+plt.savefig("plots/plot.png")
